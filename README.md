@@ -53,6 +53,14 @@ The defaults use a fixed seed, a 70/15/15 case-level split, a 96x96x96 center cr
 
 Checkpoints are written under `outputs/`, which is git-ignored. Do not upload them unless you have separately checked their provenance and the applicable dataset and model-sharing terms.
 
+## Dataset citation and license
+
+The UPENN-GBM collection is distributed by The Cancer Imaging Archive (TCIA) under CC BY 4.0, and TCIA requires a data citation. Cite the source dataset when using it:
+
+> Bakas, S., Sako, C., Akbari, H., et al. (2021). *Multi-parametric magnetic resonance imaging (mpMRI) scans for de novo Glioblastoma (GBM) patients from the University of Pennsylvania Health System (UPENN-GBM)* (Version 2) [Data set]. The Cancer Imaging Archive. https://doi.org/10.7937/TCIA.709X-DN49
+
+See the [official UPENN-GBM collection page](https://www.cancerimagingarchive.net/collection/upenn-gbm/) for the full attribution, current access instructions, and usage policy.
+
 ## License
 
 No license is currently provided. All rights are reserved by default until the repository owner adds an appropriate license.
