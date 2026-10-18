@@ -12,6 +12,7 @@ import torch
 from brain_tumor_ai_3 import (
     UPennGBMDataset,
     UNet3D,
+    TrainingAugmentation,
     case_dice,
     crop_or_pad,
     grouped_split_indices,
@@ -90,3 +91,16 @@ def test_unet3d_matches_thesis_checkpoint_layout():
     assert state["bottleneck.conv.0.weight"].shape == (128, 64, 3, 3, 3)
     assert "final.weight" in state
     assert not any(name.startswith("down1.") for name in state)
+
+
+def test_training_augmentation_flips_image_and_mask_together(monkeypatch):
+    image = torch.arange(4 * 3 * 3 * 3, dtype=torch.float32).reshape(4, 3, 3, 3)
+    mask = (torch.arange(27).reshape(1, 3, 3, 3) % 2).float()
+    monkeypatch.setattr("brain_tumor_ai_3.random.random", lambda: 0.0)
+    augmented_image, augmented_mask = TrainingAugmentation(
+        [(image, mask)], noise_std=0.0, flip_probability=1.0
+    )[0]
+    expected_image = torch.flip(torch.flip(image, dims=(1,)), dims=(2,))
+    expected_mask = torch.flip(torch.flip(mask, dims=(1,)), dims=(2,))
+    torch.testing.assert_close(augmented_image, expected_image)
+    torch.testing.assert_close(augmented_mask, expected_mask)
