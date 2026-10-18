@@ -116,6 +116,28 @@ class UPennGBMDataset(Dataset):
         return x, y
 
 
+class TrainingAugmentation(Dataset):
+    """Random sagittal/coronal flips and Gaussian noise, applied to training cases only."""
+
+    def __init__(self, dataset: Dataset, noise_std: float, flip_probability: float):
+        self.dataset = dataset
+        self.noise_std = noise_std
+        self.flip_probability = flip_probability
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        image, mask = self.dataset[index]
+        for axis in (1, 2):
+            if random.random() < self.flip_probability:
+                image = torch.flip(image, dims=(axis,))
+                mask = torch.flip(mask, dims=(axis,))
+        if self.noise_std > 0:
+            image = image + torch.randn_like(image) * self.noise_std
+        return image, mask
+
+
 class ConvBlock3d(nn.Module):
     """Convolution block matching the thesis model's checkpoint layout."""
 
