@@ -262,7 +262,7 @@ def main() -> None:
                 "volume_size": tuple(args.volume_size),
             }, args.output)
 
-    checkpoint = torch.load(args.output, map_location=device, weights_only=False)
+    checkpoint = torch.load(args.output, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint["model_state_dict"])
     test_dice = evaluate_test(model, test_loader, device, checkpoint["selected_threshold"])
     print(f"Test Dice (evaluated once): {test_dice:.4f}")
