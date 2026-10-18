@@ -287,8 +287,6 @@ def main() -> None:
                         help="Fixed probability threshold for validation and test metrics.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--thresholds", type=float, nargs="+",
-                        default=[i / 10 for i in range(1, 10)])
     parser.add_argument("--volume-size", type=int, nargs=3, default=(96, 96, 96),
                         metavar=("DEPTH", "HEIGHT", "WIDTH"))
     args = parser.parse_args()
