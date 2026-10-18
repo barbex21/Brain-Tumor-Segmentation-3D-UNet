@@ -225,7 +225,8 @@ def grouped_split_indices(dataset: UPennGBMDataset, seed: int) -> tuple[list[int
     test_subjects = set(subjects[n_train + n_val:])
 
     def indices_for(selected: set[str]) -> list[int]:
-        return [i for patient in selected for i in patients[patient]]
+        return [i for i, row in enumerate(dataset.rows)
+                if row["patient"].strip() in selected]
 
     return indices_for(train_subjects), indices_for(val_subjects), indices_for(test_subjects)
 
@@ -256,13 +257,6 @@ def main() -> None:
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dataset = UPennGBMDataset(args.manifest, tuple(args.volume_size))
-    if len(dataset) < 3:
-        raise ValueError("At least 3 cases are required for train/validation/test splits.")
-    n_train = max(1, int(0.70 * len(dataset)))
-    n_val = max(1, int(0.15 * len(dataset)))
-    n_test = len(dataset) - n_train - n_val
-    if n_test < 1:
-        n_train, n_val, n_test = len(dataset) - 2, 1, 1
     train_indices, val_indices, test_indices = grouped_split_indices(dataset, args.seed)
     train_loader = DataLoader(Subset(dataset, train_indices), batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(Subset(dataset, val_indices), batch_size=1, shuffle=False)
