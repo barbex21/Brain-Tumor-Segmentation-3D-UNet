@@ -116,43 +116,52 @@ class UPennGBMDataset(Dataset):
         return x, y
 
 
-class DoubleConv(nn.Module):
+class ConvBlock3d(nn.Module):
+    """Convolution block matching the thesis model's checkpoint layout."""
+
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv3d(in_channels, out_channels, 3, padding=1, bias=False),
-            nn.InstanceNorm3d(out_channels, affine=True),
+        self.conv = nn.Sequential(
+            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm3d(out_channels),
             nn.ReLU(inplace=True),
-            nn.Conv3d(out_channels, out_channels, 3, padding=1, bias=False),
-            nn.InstanceNorm3d(out_channels, affine=True),
+            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm3d(out_channels),
             nn.ReLU(inplace=True),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        return self.conv(x)
 
 
-class SmallUNet3D(nn.Module):
-    def __init__(self, in_channels: int = 4, base_channels: int = 8):
+class UNet3D(nn.Module):
+    """The thesis architecture: 32/64/128 channels and BatchNorm3d."""
+
+    def __init__(self, in_channels: int = 4, out_channels: int = 1, init_features: int = 32):
         super().__init__()
-        self.down1 = DoubleConv(in_channels, base_channels)
+        self.enc1 = ConvBlock3d(in_channels, init_features)
         self.pool1 = nn.MaxPool3d(2)
-        self.down2 = DoubleConv(base_channels, base_channels * 2)
+        self.enc2 = ConvBlock3d(init_features, init_features * 2)
         self.pool2 = nn.MaxPool3d(2)
-        self.bottom = DoubleConv(base_channels * 2, base_channels * 4)
-        self.up2 = nn.ConvTranspose3d(base_channels * 4, base_channels * 2, 2, stride=2)
-        self.conv2 = DoubleConv(base_channels * 4, base_channels * 2)
-        self.up1 = nn.ConvTranspose3d(base_channels * 2, base_channels, 2, stride=2)
-        self.conv1 = DoubleConv(base_channels * 2, base_channels)
-        self.out_conv = nn.Conv3d(base_channels, 1, 1)
+        self.bottleneck = ConvBlock3d(init_features * 2, init_features * 4)
+        self.up2 = nn.ConvTranspose3d(
+            init_features * 4, init_features * 2, kernel_size=2, stride=2
+        )
+        self.dec2 = ConvBlock3d(init_features * 4, init_features * 2)
+        self.up1 = nn.ConvTranspose3d(
+            init_features * 2, init_features, kernel_size=2, stride=2
+        )
+        self.dec1 = ConvBlock3d(init_features * 2, init_features)
+        self.final = nn.Conv3d(init_features, out_channels, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        c1 = self.down1(x)
-        c2 = self.down2(self.pool1(c1))
-        bottom = self.bottom(self.pool2(c2))
-        x = self.conv2(torch.cat((self.up2(bottom), c2), dim=1))
-        x = self.conv1(torch.cat((self.up1(x), c1), dim=1))
-        return self.out_conv(x)
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool1(e1))
+        bottleneck = self.bottleneck(self.pool2(e2))
+        d2 = self.dec2(torch.cat((self.up2(bottleneck), e2), dim=1))
+        d1 = self.dec1(torch.cat((self.up1(d2), e1), dim=1))
+        return self.final(d1)
+
 
 
 def dice_loss(logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
