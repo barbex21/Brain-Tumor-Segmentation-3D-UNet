@@ -8,21 +8,21 @@ A small research implementation of binary whole-tumor segmentation from aligned 
 
 - A compact 3D U-Net and BCE-Dice training objective.
 - A local manifest-based NIfTI dataset loader with modality and mask alignment checks.
-- Reproducible train/validation/test splitting.
+- Seeded, patient-grouped train/validation/test splitting to prevent visits from the same subject crossing splits.
 - Threshold selection on the validation split, checkpoint selection by validation Dice, and one final evaluation on the held-out test split.
 
 ## Data privacy
 
 MRI scans, manifests, patient or case identifiers, clinical tables, and model checkpoints are intentionally excluded from this repository. Obtain the dataset through its official distribution channel and store it outside the repository. Do not commit private inputs or generated checkpoints.
 
-The loader expects a local CSV with these columns (absolute file paths are accepted):
+The loader expects a local CSV with a `patient` column and these modality/label columns (absolute file paths are accepted):
 
 ```csv
-flair,t1,t1gd,t2,seg
-/path/to/case/FLAIR.nii.gz,/path/to/case/T1.nii.gz,/path/to/case/T1GD.nii.gz,/path/to/case/T2.nii.gz,/path/to/case/seg.nii.gz
+patient,flair,t1,t1gd,t2,seg
+synthetic-subject,/path/to/case/FLAIR.nii.gz,/path/to/case/T1.nii.gz,/path/to/case/T1GD.nii.gz,/path/to/case/T2.nii.gz,/path/to/case/seg.nii.gz
 ```
 
-The manifest is a local input and is not supplied here. Each case's four modalities and segmentation must already share the same voxel grid and affine. Resample them to a common grid before training if needed. All non-zero segmentation labels are treated as tumor, so the target is whole tumor rather than a specific subregion.
+The manifest is a local input and is not supplied here. Its subject IDs are used only to keep all visits from one subject in the same split; they are not printed or written to outputs. Each case's four modalities and segmentation must already share the same voxel grid and affine. Resample them to a common grid before training if needed. All non-zero segmentation labels are treated as tumor, so the target is whole tumor rather than a specific subregion.
 
 ## Setup
 
@@ -49,9 +49,20 @@ On Windows, quote paths containing spaces:
 python brain_tumor_ai_3.py --manifest "C:\data\local_manifest.csv" --output "outputs\best_model.pth"
 ```
 
-The defaults use a fixed seed, a 70/15/15 case-level split, a 96x96x96 center crop/pad, and threshold candidates from 0.1 through 0.9. The selected threshold is chosen using validation Dice only and stored with the best validation checkpoint. The held-out test split is evaluated once after training. Results depend on the dataset, split, preprocessing, hardware, and training settings; no performance claim is made by this repository.
+The defaults use a fixed seed, an approximately 70/15/15 patient-level split, a 96x96x96 center crop/pad, and threshold candidates from 0.1 through 0.9. The selected threshold is chosen using validation Dice only and stored with the best validation checkpoint. The held-out test split is evaluated once after training. A summary CSV records the selected threshold, validation/test Dice, split sizes, and seed without case identifiers. Results still depend on the dataset, preprocessing, hardware, and training settings; no performance claim is made by this repository.
 
-Checkpoints are written under `outputs/`, which is git-ignored. Do not upload them unless you have separately checked their provenance and the applicable dataset and model-sharing terms.
+Checkpoints and summary CSV files are written under `outputs/`, which is git-ignored. Do not upload checkpoints unless you have separately checked their provenance and the applicable dataset and model-sharing terms.
+
+## Tests
+
+Install development dependencies and run the synthetic-data tests:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+The tests use generated toy volumes only; they do not download or require UPENN-GBM scans.
 
 ## Dataset citation and license
 
