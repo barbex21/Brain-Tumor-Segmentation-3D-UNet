@@ -11,6 +11,7 @@ import torch
 
 from brain_tumor_ai_3 import (
     UPennGBMDataset,
+    UNet3D,
     case_dice,
     crop_or_pad,
     grouped_split_indices,
@@ -81,3 +82,11 @@ def test_grouped_split_rejects_missing_subject_identifier():
     dataset = SimpleNamespace(rows=[{"patient": ""}, {"patient": "subject-2"}, {"patient": "subject-3"}])
     with pytest.raises(ValueError, match="Missing patient identifier"):
         grouped_split_indices(dataset, seed=1)
+
+def test_unet3d_matches_thesis_checkpoint_layout():
+    state = UNet3D().state_dict()
+    assert state["enc1.conv.0.weight"].shape == (32, 4, 3, 3, 3)
+    assert state["enc1.conv.1.running_mean"].shape == (32,)
+    assert state["bottleneck.conv.0.weight"].shape == (128, 64, 3, 3, 3)
+    assert "final.weight" in state
+    assert not any(name.startswith("down1.") for name in state)
