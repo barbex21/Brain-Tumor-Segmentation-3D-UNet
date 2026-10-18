@@ -6,7 +6,7 @@ A small research implementation of binary whole-tumor segmentation from aligned 
 
 ## What is included
 
-- A compact 3D U-Net and BCE-Dice training objective.
+- The thesis-matching 3D U-Net architecture (32/64/128 channels, BatchNorm3d) and Dice loss.
 - A local manifest-based NIfTI dataset loader with modality and mask alignment checks.
 - Seeded, patient-grouped train/validation/test splitting to prevent visits from the same subject crossing splits.
 - Threshold selection on the validation split, checkpoint selection by validation Dice, and one final evaluation on the held-out test split.
@@ -40,7 +40,7 @@ python -m pip install -r requirements.txt
 ## Train and evaluate
 
 ```bash
-python brain_tumor_ai_3.py --manifest /path/to/local_manifest.csv --epochs 5
+python brain_tumor_ai_3.py --manifest /path/to/local_manifest.csv
 ```
 
 On Windows, quote paths containing spaces:
@@ -49,13 +49,13 @@ On Windows, quote paths containing spaces:
 python brain_tumor_ai_3.py --manifest "C:\data\local_manifest.csv" --output "outputs\best_model.pth"
 ```
 
-The defaults use a fixed seed, an approximately 70/15/15 patient-level split, a 96x96x96 center crop/pad, and threshold candidates from 0.1 through 0.9. The selected threshold is chosen using validation Dice only and stored with the best validation checkpoint. The held-out test split is evaluated once after training. A summary CSV records the selected threshold, validation/test Dice, split sizes, and seed without case identifiers. Results still depend on the dataset, preprocessing, hardware, and training settings; no performance claim is made by this repository.
+The defaults follow the thesis protocol where specified: seed 42, a patient-level 70/15/15 split, 96x96x96 center crop/pad, Dice loss, Adam at 1e-4, batch size 2, up to 100 epochs, and early stopping on validation loss (patience 10, min-delta 0.001). Training-only augmentation applies sagittal/coronal flips and Gaussian noise (the default standard deviation of 0.01 is a repo setting because the thesis does not state its exact value). Threshold candidates from 0.1 through 0.9 are compared on validation Dice; the selected checkpoint is the one with the best validation loss. The held-out test split is evaluated once. A summary CSV records the selected threshold, validation/test metrics, split sizes, and seed without case identifiers. This is a documented-method implementation, not a bit-for-bit reproduction of the original Colab run; results depend on the data ordering, preprocessing, hardware, and settings.
 
 Checkpoints and summary CSV files are written under `outputs/`, which is git-ignored. Do not upload checkpoints unless you have separately checked their provenance and the applicable dataset and model-sharing terms.
 
 ## Tests
 
-Install development dependencies and run the synthetic-data tests:
+The synthetic tests also check that the network's state-dict layer names and channel shapes match the thesis checkpoint architecture. Install development dependencies and run the tests:
 
 ```bash
 python -m pip install -r requirements-dev.txt
