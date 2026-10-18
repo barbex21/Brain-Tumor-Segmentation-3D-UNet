@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+outputs/
+*.pth
+*.pt
+*.ckpt
+.env
+.env.*
+*.nii
+*.nii.gz
+*manifest*.csv
