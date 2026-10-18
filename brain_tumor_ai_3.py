@@ -15,11 +15,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, Subset
 
 
 MODALITY_COLUMNS = ("flair", "t1", "t1gd", "t2")
-REQUIRED_COLUMNS = (*MODALITY_COLUMNS, "seg")
+REQUIRED_COLUMNS = ("patient", *MODALITY_COLUMNS, "seg")
 
 
 def seed_everything(seed: int) -> None:
@@ -28,6 +28,9 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
 
 
 def crop_or_pad(array: np.ndarray, target: tuple[int, int, int]) -> np.ndarray:
@@ -68,15 +71,17 @@ class UPennGBMDataset(Dataset):
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         row = self.rows[index]
         paths = [Path(row[name]).expanduser() for name in (*MODALITY_COLUMNS, "seg")]
-        for path in paths:
-            if not path.is_file():
-                raise FileNotFoundError(f"Input file not found (manifest row {index + 2}): {path}")
-
         images = []
         reference_shape = None
-        for path in paths[:4]:
+        for column, path in zip(MODALITY_COLUMNS, paths[:4]):
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"Input file missing for manifest row {index + 2}, column '{column}'."
+                )
             image = nib.load(str(path))
             volume = np.asarray(image.dataobj, dtype=np.float32)
+            if volume.ndim != 3:
+                raise ValueError(f"Expected a 3D volume in manifest row {index + 2}, column '{column}'.")
             if reference_shape is None:
                 reference_shape = volume.shape
                 reference_affine = image.affine
@@ -86,7 +91,7 @@ class UPennGBMDataset(Dataset):
                     "resample them to a common grid before training."
                 )
             if not np.isfinite(volume).all():
-                raise ValueError(f"Non-finite MRI values in manifest row {index + 2}: {path.name}")
+                raise ValueError(f"Non-finite MRI values in manifest row {index + 2}, column '{column}'.")
             volume = crop_or_pad(volume, self.target_size)
             nonzero = volume != 0
             if nonzero.any():
@@ -95,6 +100,8 @@ class UPennGBMDataset(Dataset):
                 volume[nonzero] = (volume[nonzero] - mean) / max(float(std), 1e-8)
             images.append(volume)
 
+        if not paths[4].is_file():
+            raise FileNotFoundError(f"Segmentation file missing for manifest row {index + 2}.")
         mask_img = nib.load(str(paths[4]))
         mask_volume = np.asarray(mask_img.dataobj, dtype=np.float32)
         if (mask_volume.shape != reference_shape or
@@ -195,11 +202,41 @@ def evaluate_test(model: nn.Module, loader: DataLoader, device: torch.device,
     return float(np.mean(scores))
 
 
+def grouped_split_indices(dataset: UPennGBMDataset, seed: int) -> tuple[list[int], list[int], list[int]]:
+    """Split whole subjects so repeated visits cannot cross split boundaries."""
+    patients: dict[str, list[int]] = {}
+    for index, row in enumerate(dataset.rows):
+        subject = row.get("patient", "").strip()
+        if not subject:
+            raise ValueError(f"Missing patient identifier in manifest row {index + 2}.")
+        patients.setdefault(subject, []).append(index)
+    subjects = list(patients)
+    if len(subjects) < 3:
+        raise ValueError("At least 3 unique patients are required for grouped train/validation/test splits.")
+
+    rng = np.random.default_rng(seed)
+    rng.shuffle(subjects)
+    n_train = max(1, int(0.70 * len(subjects)))
+    n_val = max(1, int(0.15 * len(subjects)))
+    if n_train + n_val >= len(subjects):
+        n_train, n_val = len(subjects) - 2, 1
+    train_subjects = set(subjects[:n_train])
+    val_subjects = set(subjects[n_train:n_train + n_val])
+    test_subjects = set(subjects[n_train + n_val:])
+
+    def indices_for(selected: set[str]) -> list[int]:
+        return [i for patient in selected for i in patients[patient]]
+
+    return indices_for(train_subjects), indices_for(val_subjects), indices_for(test_subjects)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True,
-                        help="Local CSV with flair,t1,t1gd,t2,seg path columns; never commit it.")
+                        help="Local CSV with patient,flair,t1,t1gd,t2,seg columns; never commit it.")
     parser.add_argument("--output", type=Path, default=Path("outputs/best_model.pth"))
+    parser.add_argument("--metrics-output", type=Path, default=None,
+                        help="Summary CSV path; defaults beside the checkpoint.")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
@@ -211,6 +248,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.epochs < 1 or args.batch_size < 1:
         parser.error("--epochs and --batch-size must be positive")
+    if any(size < 4 or size % 4 != 0 for size in args.volume_size):
+        parser.error("each --volume-size dimension must be a positive multiple of 4")
     if len(args.thresholds) == 0 or any(t <= 0 or t >= 1 for t in args.thresholds):
         parser.error("--thresholds must be between 0 and 1")
 
@@ -224,18 +263,17 @@ def main() -> None:
     n_test = len(dataset) - n_train - n_val
     if n_test < 1:
         n_train, n_val, n_test = len(dataset) - 2, 1, 1
-    train_ds, val_ds, test_ds = random_split(
-        dataset, [n_train, n_val, n_test],
-        generator=torch.Generator().manual_seed(args.seed),
-    )
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
+    train_indices, val_indices, test_indices = grouped_split_indices(dataset, args.seed)
+    train_loader = DataLoader(Subset(dataset, train_indices), batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(Subset(dataset, val_indices), batch_size=1, shuffle=False)
+    test_loader = DataLoader(Subset(dataset, test_indices), batch_size=1, shuffle=False)
 
     model = SmallUNet3D().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     best_val_dice = -1.0
     best_threshold = 0.5
+    best_epoch = 0
+    best_state = None
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(args.epochs):
@@ -254,20 +292,41 @@ def main() -> None:
               f"val_dice={val_dice:.4f}, threshold={threshold:.2f}")
         if val_dice > best_val_dice:
             best_val_dice, best_threshold = val_dice, threshold
+            best_epoch = epoch + 1
+            best_state = {key: value.detach().cpu().clone()
+                          for key, value in model.state_dict().items()}
             torch.save({
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": best_state,
                 "validation_dice": best_val_dice,
                 "selected_threshold": best_threshold,
+                "best_epoch": best_epoch,
                 "seed": args.seed,
                 "volume_size": tuple(args.volume_size),
             }, args.output)
 
-    checkpoint = torch.load(args.output, map_location=device, weights_only=True)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    test_dice = evaluate_test(model, test_loader, device, checkpoint["selected_threshold"])
+    if best_state is None:
+        raise RuntimeError("Training did not produce a valid checkpoint.")
+    model.load_state_dict(best_state)
+    test_dice = evaluate_test(model, test_loader, device, best_threshold)
+    metrics_output = args.metrics_output or args.output.with_name(f"{args.output.stem}_metrics.csv")
+    metrics_output.parent.mkdir(parents=True, exist_ok=True)
+    with metrics_output.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(("metric", "value"))
+        writer.writerows((
+            ("best_epoch", best_epoch),
+            ("selected_threshold", f"{best_threshold:.4f}"),
+            ("validation_dice", f"{best_val_dice:.6f}"),
+            ("test_dice", f"{test_dice:.6f}"),
+            ("train_cases", len(train_indices)),
+            ("validation_cases", len(val_indices)),
+            ("test_cases", len(test_indices)),
+            ("seed", args.seed),
+        ))
     print(f"Test Dice (evaluated once): {test_dice:.4f}")
     print(f"Checkpoint: {args.output}")
-    print("Patient/case identifiers are not printed or included in the checkpoint.")
+    print(f"Metrics: {metrics_output}")
+    print("Patient/case identifiers are not printed or included in outputs.")
 
 
 if __name__ == "__main__":
