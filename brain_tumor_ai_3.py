@@ -93,7 +93,6 @@ class UPennGBMDataset(Dataset):
             if not np.isfinite(volume).all():
                 raise ValueError(f"Non-finite MRI values in manifest row {index + 2}, column '{column}'.")
             volume = crop_or_pad(volume, self.target_size)
-            nonzero = volume != 0
             mean = volume.mean()
             std = volume.std()
             volume = (volume - mean) / max(float(std), 1e-8)
@@ -333,15 +332,7 @@ def main() -> None:
             epochs_without_improvement = 0
             best_state = {key: value.detach().cpu().clone()
                           for key, value in model.state_dict().items()}
-            torch.save({
-                "model_state_dict": best_state,
-                "validation_loss": best_val_loss,
-                "validation_dice": best_val_dice,
-                "selected_threshold": best_threshold,
-                "best_epoch": best_epoch,
-                "seed": args.seed,
-                "volume_size": tuple(args.volume_size),
-            }, args.output)
+            torch.save(best_state, args.output)
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= args.patience:
