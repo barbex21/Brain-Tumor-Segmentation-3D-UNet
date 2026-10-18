@@ -200,7 +200,7 @@ def case_dice(prediction: torch.Tensor, target: torch.Tensor, eps: float = 1e-6)
 
 @torch.no_grad()
 def validate(model: nn.Module, loader: DataLoader, device: torch.device,
-             thresholds: list[float]) -> tuple[float, float]:
+             thresholds: list[float]) -> tuple[float, float, float]:
     model.eval()
     scores = {threshold: [] for threshold in thresholds}
     losses = []
@@ -265,17 +265,27 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("outputs/best_model.pth"))
     parser.add_argument("--metrics-output", type=Path, default=None,
                         help="Summary CSV path; defaults beside the checkpoint.")
-    parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--min-delta", type=float, default=0.001)
+    parser.add_argument("--noise-std", type=float, default=0.01,
+                        help="Training-only Gaussian noise standard deviation.")
+    parser.add_argument("--flip-probability", type=float, default=0.5,
+                        help="Training-only probability for each spatial flip.")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--thresholds", type=float, nargs="+",
                         default=[i / 10 for i in range(1, 10)])
     parser.add_argument("--volume-size", type=int, nargs=3, default=(96, 96, 96),
                         metavar=("DEPTH", "HEIGHT", "WIDTH"))
     args = parser.parse_args()
-    if args.epochs < 1 or args.batch_size < 1:
-        parser.error("--epochs and --batch-size must be positive")
+    if args.epochs < 1 or args.batch_size < 1 or args.patience < 1:
+        parser.error("--epochs, --batch-size, and --patience must be positive")
+    if args.min_delta < 0 or args.noise_std < 0:
+        parser.error("--min-delta and --noise-std must be non-negative")
+    if not 0 <= args.flip_probability <= 1:
+        parser.error("--flip-probability must be between 0 and 1")
     if any(size < 4 or size % 4 != 0 for size in args.volume_size):
         parser.error("each --volume-size dimension must be a positive multiple of 4")
     if len(args.thresholds) == 0 or any(t <= 0 or t >= 1 for t in args.thresholds):
@@ -285,15 +295,20 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dataset = UPennGBMDataset(args.manifest, tuple(args.volume_size))
     train_indices, val_indices, test_indices = grouped_split_indices(dataset, args.seed)
-    train_loader = DataLoader(Subset(dataset, train_indices), batch_size=args.batch_size, shuffle=True)
+    train_loader = DataLoader(
+        TrainingAugmentation(Subset(dataset, train_indices), args.noise_std, args.flip_probability),
+        batch_size=args.batch_size, shuffle=True,
+    )
     val_loader = DataLoader(Subset(dataset, val_indices), batch_size=1, shuffle=False)
     test_loader = DataLoader(Subset(dataset, test_indices), batch_size=1, shuffle=False)
 
-    model = SmallUNet3D().to(device)
+    model = UNet3D().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    best_val_loss = float("inf")
     best_val_dice = -1.0
     best_threshold = 0.5
     best_epoch = 0
+    epochs_without_improvement = 0
     best_state = None
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -303,27 +318,35 @@ def main() -> None:
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad(set_to_none=True)
-            loss = combined_loss(model(x), y)
+            loss = dice_loss(model(x), y)
             loss.backward()
             optimizer.step()
             losses.append(loss.item())
 
-        val_dice, threshold = validate(model, val_loader, device, args.thresholds)
-        print(f"Epoch {epoch + 1}/{args.epochs}: train_loss={np.mean(losses):.4f}, "
-              f"val_dice={val_dice:.4f}, threshold={threshold:.2f}")
-        if val_dice > best_val_dice:
+        val_loss, val_dice, threshold = validate(model, val_loader, device, args.thresholds)
+        print(f"Epoch {epoch + 1}/{args.epochs}: train_dice_loss={np.mean(losses):.4f}, "
+              f"val_dice_loss={val_loss:.4f}, val_dice={val_dice:.4f}, threshold={threshold:.2f}")
+        if val_loss < best_val_loss - args.min_delta:
+            best_val_loss = val_loss
             best_val_dice, best_threshold = val_dice, threshold
             best_epoch = epoch + 1
+            epochs_without_improvement = 0
             best_state = {key: value.detach().cpu().clone()
                           for key, value in model.state_dict().items()}
             torch.save({
                 "model_state_dict": best_state,
+                "validation_loss": best_val_loss,
                 "validation_dice": best_val_dice,
                 "selected_threshold": best_threshold,
                 "best_epoch": best_epoch,
                 "seed": args.seed,
                 "volume_size": tuple(args.volume_size),
             }, args.output)
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= args.patience:
+                print(f"Early stopping after {epoch + 1} epochs.")
+                break
 
     if best_state is None:
         raise RuntimeError("Training did not produce a valid checkpoint.")
@@ -337,6 +360,7 @@ def main() -> None:
         writer.writerows((
             ("best_epoch", best_epoch),
             ("selected_threshold", f"{best_threshold:.4f}"),
+            ("validation_loss", f"{best_val_loss:.6f}"),
             ("validation_dice", f"{best_val_dice:.6f}"),
             ("test_dice", f"{test_dice:.6f}"),
             ("train_cases", len(train_indices)),
@@ -348,7 +372,6 @@ def main() -> None:
     print(f"Checkpoint: {args.output}")
     print(f"Metrics: {metrics_output}")
     print("Patient/case identifiers are not printed or included in outputs.")
-
 
 if __name__ == "__main__":
     main()
