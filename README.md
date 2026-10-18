@@ -68,7 +68,7 @@ The tests use generated toy volumes only; they do not download or require UPENN-
 
 The UPENN-GBM collection is distributed by The Cancer Imaging Archive (TCIA) under CC BY 4.0, and TCIA requires a data citation. Cite the source dataset when using it:
 
-> Bakas, S., Sako, C., Akbari, H., et al. (2021). *Multi-parametric magnetic resonance imaging (mpMRI) scans for de novo Glioblastoma (GBM) patients from the University of Pennsylvania Health System (UPENN-GBM)* (Version 2) [Data set]. The Cancer Imaging Archive. https://doi.org/10.7937/TCIA.709X-DN49
+> Bakas, S., Sako, C., Akbari, H., Bilello, M., Sotiras, A., Shukla, G., Rudie, J. D., Flores Santamaria, N., Fathi Kazerooni, A., Pati, S., Rathore, S., Mamourian, E., Ha, S. M., Parker, W., Doshi, J., Baid, U., Bergman, M., Binder, Z. A., Verma, R., … Davatzikos, C. (2021). *Multi-parametric magnetic resonance imaging (mpMRI) scans for de novo Glioblastoma (GBM) patients from the University of Pennsylvania Health System (UPENN-GBM)* (Version 2) [Data set]. The Cancer Imaging Archive. https://doi.org/10.7937/TCIA.709X-DN49
 
 See the [official UPENN-GBM collection page](https://www.cancerimagingarchive.net/collection/upenn-gbm/) for the full attribution, current access instructions, and usage policy.
 
