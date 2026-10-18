@@ -9,7 +9,7 @@ A small research implementation of binary whole-tumor segmentation from aligned 
 - The thesis-matching 3D U-Net architecture (32/64/128 channels, BatchNorm3d) and Dice loss.
 - A local manifest-based NIfTI dataset loader with modality and mask alignment checks.
 - Seeded, patient-grouped train/validation/test splitting to prevent visits from the same subject crossing splits.
-- Threshold selection on the validation split, checkpoint selection by validation Dice, and one final evaluation on the held-out test split.
+- Threshold selection on validation Dice, checkpoint selection by validation loss, and one final evaluation on the held-out test split.
 
 ## Data privacy
 
