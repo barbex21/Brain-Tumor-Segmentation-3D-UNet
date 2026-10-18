@@ -14,6 +14,7 @@ from brain_tumor_ai_3 import (
     UNet3D,
     TrainingAugmentation,
     case_dice,
+    case_iou,
     crop_or_pad,
     grouped_split_indices,
 )
@@ -37,6 +38,8 @@ def test_dice_empty_masks_and_perfect_overlap():
     full = torch.ones((1, 4, 4, 4))
     assert case_dice(empty, empty) == 1.0
     assert case_dice(full, full) == pytest.approx(1.0)
+    assert case_iou(empty, empty) == 1.0
+    assert case_iou(full, full) == pytest.approx(1.0)
 
 
 def test_grouped_split_keeps_repeated_visits_together():
@@ -98,9 +101,23 @@ def test_training_augmentation_flips_image_and_mask_together(monkeypatch):
     mask = (torch.arange(27).reshape(1, 3, 3, 3) % 2).float()
     monkeypatch.setattr("brain_tumor_ai_3.random.random", lambda: 0.0)
     augmented_image, augmented_mask = TrainingAugmentation(
-        [(image, mask)], noise_std=0.0, flip_probability=1.0
+        [(image, mask)], noise_std=0.01, flip_probability=1.0,
+        noise_probability=0.0,
     )[0]
-    expected_image = torch.flip(torch.flip(image, dims=(1,)), dims=(2,))
-    expected_mask = torch.flip(torch.flip(mask, dims=(1,)), dims=(2,))
+    expected_image = torch.flip(torch.flip(image, dims=(-1,)), dims=(-2,))
+    expected_mask = torch.flip(torch.flip(mask, dims=(-1,)), dims=(-2,))
     torch.testing.assert_close(augmented_image, expected_image)
     torch.testing.assert_close(augmented_mask, expected_mask)
+
+
+def test_training_augmentation_applies_noise_with_configured_probability(monkeypatch):
+    image = torch.zeros((4, 3, 3, 3))
+    mask = torch.zeros((1, 3, 3, 3))
+    draws = iter((0.9, 0.9, 0.1))
+    monkeypatch.setattr("brain_tumor_ai_3.random.random", lambda: next(draws))
+    augmented_image, augmented_mask = TrainingAugmentation(
+        [(image, mask)], noise_std=0.01, flip_probability=0.5,
+        noise_probability=0.2,
+    )[0]
+    assert torch.count_nonzero(augmented_image) > 0
+    torch.testing.assert_close(augmented_mask, mask)

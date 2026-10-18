@@ -115,23 +115,25 @@ class UPennGBMDataset(Dataset):
 
 
 class TrainingAugmentation(Dataset):
-    """Random sagittal/coronal flips and Gaussian noise, applied to training cases only."""
+    """Flip the last two spatial axes and add noise probabilistically, for training only."""
 
-    def __init__(self, dataset: Dataset, noise_std: float, flip_probability: float):
+    def __init__(self, dataset: Dataset, noise_std: float, flip_probability: float,
+                 noise_probability: float = 0.2):
         self.dataset = dataset
         self.noise_std = noise_std
         self.flip_probability = flip_probability
+        self.noise_probability = noise_probability
 
     def __len__(self) -> int:
         return len(self.dataset)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         image, mask = self.dataset[index]
-        for axis in (1, 2):
+        for axis in (-1, -2):
             if random.random() < self.flip_probability:
                 image = torch.flip(image, dims=(axis,))
                 mask = torch.flip(mask, dims=(axis,))
-        if self.noise_std > 0:
+        if self.noise_std > 0 and random.random() < self.noise_probability:
             image = image + torch.randn_like(image) * self.noise_std
         return image, mask
 
@@ -197,35 +199,42 @@ def case_dice(prediction: torch.Tensor, target: torch.Tensor, eps: float = 1e-6)
     return 1.0 if denominator == 0 else (2 * intersection + eps) / (denominator + eps)
 
 
+def case_iou(prediction: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> float:
+    intersection = (prediction * target).sum().item()
+    union = prediction.sum().item() + target.sum().item() - intersection
+    return 1.0 if union == 0 else (intersection + eps) / (union + eps)
+
+
 @torch.no_grad()
 def validate(model: nn.Module, loader: DataLoader, device: torch.device,
-             thresholds: list[float]) -> tuple[float, float, float]:
+             threshold: float) -> tuple[float, float]:
+    """Return mean Dice loss and per-case Dice at the fixed evaluation threshold."""
     model.eval()
-    scores = {threshold: [] for threshold in thresholds}
+    scores = []
     losses = []
     for x, y in loader:
         x, y = x.to(device), y.to(device)
         logits = model(x)
         losses.append(dice_loss(logits, y).item())
-        probs = torch.sigmoid(logits)
-        for threshold in thresholds:
-            pred = (probs >= threshold).float()
-            scores[threshold].extend(case_dice(p, t) for p, t in zip(pred, y))
-    best_threshold = max(thresholds, key=lambda t: float(np.mean(scores[t])))
-    best_dice = float(np.mean(scores[best_threshold]))
-    return float(np.mean(losses)), best_dice, best_threshold
+        pred = (torch.sigmoid(logits) > threshold).float()
+        scores.extend(case_dice(p, t) for p, t in zip(pred, y))
+    return float(np.mean(losses)), float(np.mean(scores))
 
 
 @torch.no_grad()
 def evaluate_test(model: nn.Module, loader: DataLoader, device: torch.device,
-                  threshold: float) -> float:
+                  threshold: float) -> tuple[float, float]:
+    """Evaluate test Dice and IoU once at the threshold fixed by the source workflow."""
     model.eval()
-    scores = []
+    dice_scores = []
+    iou_scores = []
     for x, y in loader:
         probs = torch.sigmoid(model(x.to(device)))
-        pred = (probs >= threshold).float()
-        scores.extend(case_dice(p, t.to(device)) for p, t in zip(pred, y))
-    return float(np.mean(scores))
+        pred = (probs > threshold).float()
+        targets = y.to(device)
+        dice_scores.extend(case_dice(p, t) for p, t in zip(pred, targets))
+        iou_scores.extend(case_iou(p, t) for p, t in zip(pred, targets))
+    return float(np.mean(dice_scores)), float(np.mean(iou_scores))
 
 
 def grouped_split_indices(dataset: UPennGBMDataset, seed: int) -> tuple[list[int], list[int], list[int]]:
@@ -270,12 +279,14 @@ def main() -> None:
     parser.add_argument("--min-delta", type=float, default=0.001)
     parser.add_argument("--noise-std", type=float, default=0.01,
                         help="Training-only Gaussian noise standard deviation.")
+    parser.add_argument("--noise-probability", type=float, default=0.2,
+                        help="Training-only probability of applying Gaussian noise.")
     parser.add_argument("--flip-probability", type=float, default=0.5,
                         help="Training-only probability for each spatial flip.")
+    parser.add_argument("--threshold", type=float, default=0.5,
+                        help="Fixed probability threshold for validation and test metrics.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--thresholds", type=float, nargs="+",
-                        default=[i / 10 for i in range(1, 10)])
     parser.add_argument("--volume-size", type=int, nargs=3, default=(96, 96, 96),
                         metavar=("DEPTH", "HEIGHT", "WIDTH"))
     args = parser.parse_args()
@@ -285,17 +296,21 @@ def main() -> None:
         parser.error("--min-delta and --noise-std must be non-negative")
     if not 0 <= args.flip_probability <= 1:
         parser.error("--flip-probability must be between 0 and 1")
+    if not 0 <= args.noise_probability <= 1:
+        parser.error("--noise-probability must be between 0 and 1")
+    if not 0 <= args.threshold <= 1:
+        parser.error("--threshold must be between 0 and 1")
     if any(size < 4 or size % 4 != 0 for size in args.volume_size):
         parser.error("each --volume-size dimension must be a positive multiple of 4")
-    if len(args.thresholds) == 0 or any(t <= 0 or t >= 1 for t in args.thresholds):
-        parser.error("--thresholds must be between 0 and 1")
-
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dataset = UPennGBMDataset(args.manifest, tuple(args.volume_size))
     train_indices, val_indices, test_indices = grouped_split_indices(dataset, args.seed)
     train_loader = DataLoader(
-        TrainingAugmentation(Subset(dataset, train_indices), args.noise_std, args.flip_probability),
+        TrainingAugmentation(
+            Subset(dataset, train_indices), args.noise_std,
+            args.flip_probability, args.noise_probability,
+        ),
         batch_size=args.batch_size, shuffle=True,
     )
     val_loader = DataLoader(Subset(dataset, val_indices), batch_size=1, shuffle=False)
@@ -322,12 +337,13 @@ def main() -> None:
             optimizer.step()
             losses.append(loss.item())
 
-        val_loss, val_dice, threshold = validate(model, val_loader, device, args.thresholds)
+        val_loss, val_dice = validate(model, val_loader, device, args.threshold)
         print(f"Epoch {epoch + 1}/{args.epochs}: train_dice_loss={np.mean(losses):.4f}, "
-              f"val_dice_loss={val_loss:.4f}, val_dice={val_dice:.4f}, threshold={threshold:.2f}")
+              f"val_dice_loss={val_loss:.4f}, val_dice={val_dice:.4f}, "
+              f"threshold={args.threshold:.2f}")
         if val_loss < best_val_loss - args.min_delta:
             best_val_loss = val_loss
-            best_val_dice, best_threshold = val_dice, threshold
+            best_val_dice, best_threshold = val_dice, args.threshold
             best_epoch = epoch + 1
             epochs_without_improvement = 0
             best_state = {key: value.detach().cpu().clone()
@@ -342,7 +358,7 @@ def main() -> None:
     if best_state is None:
         raise RuntimeError("Training did not produce a valid checkpoint.")
     model.load_state_dict(best_state)
-    test_dice = evaluate_test(model, test_loader, device, best_threshold)
+    test_dice, test_iou = evaluate_test(model, test_loader, device, best_threshold)
     metrics_output = args.metrics_output or args.output.with_name(f"{args.output.stem}_metrics.csv")
     metrics_output.parent.mkdir(parents=True, exist_ok=True)
     with metrics_output.open("w", newline="", encoding="utf-8") as stream:
@@ -354,12 +370,14 @@ def main() -> None:
             ("validation_loss", f"{best_val_loss:.6f}"),
             ("validation_dice", f"{best_val_dice:.6f}"),
             ("test_dice", f"{test_dice:.6f}"),
+            ("test_iou", f"{test_iou:.6f}"),
             ("train_cases", len(train_indices)),
             ("validation_cases", len(val_indices)),
             ("test_cases", len(test_indices)),
             ("seed", args.seed),
         ))
     print(f"Test Dice (evaluated once): {test_dice:.4f}")
+    print(f"Test IoU (evaluated once): {test_iou:.4f}")
     print(f"Checkpoint: {args.output}")
     print(f"Metrics: {metrics_output}")
     print("Patient/case identifiers are not printed or included in outputs.")
