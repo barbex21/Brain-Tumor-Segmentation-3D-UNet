@@ -94,10 +94,9 @@ class UPennGBMDataset(Dataset):
                 raise ValueError(f"Non-finite MRI values in manifest row {index + 2}, column '{column}'.")
             volume = crop_or_pad(volume, self.target_size)
             nonzero = volume != 0
-            if nonzero.any():
-                mean = volume[nonzero].mean()
-                std = volume[nonzero].std()
-                volume[nonzero] = (volume[nonzero] - mean) / max(float(std), 1e-8)
+            mean = volume.mean()
+            std = volume.std()
+            volume = (volume - mean) / max(float(std), 1e-8)
             images.append(volume)
 
         if not paths[4].is_file():
@@ -193,10 +192,6 @@ def dice_loss(logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> 
     return 1 - dice.mean()
 
 
-def combined_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    return 0.5 * F.binary_cross_entropy_with_logits(logits, target) + 0.5 * dice_loss(logits, target)
-
-
 def case_dice(prediction: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> float:
     intersection = (prediction * target).sum().item()
     denominator = prediction.sum().item() + target.sum().item()
@@ -212,13 +207,14 @@ def validate(model: nn.Module, loader: DataLoader, device: torch.device,
     for x, y in loader:
         x, y = x.to(device), y.to(device)
         logits = model(x)
-        losses.append(combined_loss(logits, y).item())
+        losses.append(dice_loss(logits, y).item())
         probs = torch.sigmoid(logits)
         for threshold in thresholds:
             pred = (probs >= threshold).float()
             scores[threshold].extend(case_dice(p, t) for p, t in zip(pred, y))
     best_threshold = max(thresholds, key=lambda t: float(np.mean(scores[t])))
-    return float(np.mean(scores[best_threshold])), best_threshold
+    best_dice = float(np.mean(scores[best_threshold]))
+    return float(np.mean(losses)), best_dice, best_threshold
 
 
 @torch.no_grad()
